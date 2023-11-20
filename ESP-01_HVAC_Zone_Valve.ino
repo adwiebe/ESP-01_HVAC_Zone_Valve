@@ -36,10 +36,10 @@ configData_Struct config_data = {
   21,  // initial plenum temp
   {40,255,159,44,179,22,4,141}, // room one-wire ID
   21,  // initial room remp
-  21,        // default set point C * 10
-  500,        // damper open ms
-  2250,       // damper closed ms
-  3000        // total servo pulse length
+  18,         // default set point C
+  25,        // damper open degrees
+  170,       // damper closed degrees
+  3000        // total servo pulse length - no longer used.
 } ;
 
 bool b_damperOpen = false;
@@ -56,15 +56,25 @@ void setup() {
   
   Serial.begin(115200);
 
-//  EEPROM.begin(512);
+  EEPROM.begin(512);
+
+// bootstrap - comment out once values are saved.
+//  saveConfig();
+
+// Uncomment once EEPROM has valid data.
   getConfig();
   
   setupWiFi();
+  
+  // 2023-11-18
+  // Add delay before cranking damper open. Allows power capacitor to fill up and provide stable 5V
+  delay(1000);
   
   // Setup for controlling a hobby servo
 
   servoIndex = ISR_Servo.setupServo(damperPIN, MIN_MICROS, MAX_MICROS); 
   //pinMode(damperPIN, OUTPUT);
+  wiggleDamper();
   pulseDamper(true); // open the damper.
 }
 
@@ -77,20 +87,16 @@ void loop() {
   static unsigned long tic = 0;
   float celsius;
 
-//  if ((tic % 1500000) == 0) { // about 1 / minute
-  if ((tic % 250000) == 0) {  // about 1 / 10 seconds?
+  if ((tic % 125000) == 0) {  // 250K ~= 10sec
     celsius = getTemp(config_data.tp_id);
     if (celsius > 0) config_data.t_p = celsius;
     delay(100); // needed?
     celsius = getTemp(config_data.tr_id);
     if (celsius > 0) config_data.t_r = celsius;
-  }
 
-  if ((tic % 125000) == 0) {  // about 1 / 5 seconds?
-//    controlDamper_2();
     controlDamper();
   }
-
+ 
   handleWebRequests();  
 
   tic++;
@@ -321,6 +327,27 @@ void pulseDamper_old(bool bOpen){
   }
 }
 
+
+//========================================================
+//
+// int wiggleDamper()
+//
+// Run damper through some warmup steps to validate
+//
+//========================================================
+void wiggleDamper() {
+  ISR_Servo.enableAll();
+
+  ISR_Servo.setPosition(servoIndex, 50);  // 50% - go to middle.
+  delay(1000);
+  ISR_Servo.setPosition(servoIndex, config_data.d_close);
+  delay(1000);
+  ISR_Servo.setPosition(servoIndex, config_data.d_open);
+  
+  ISR_Servo.disableAll();
+
+}
+
 //========================================================
 //
 // int getTemp (int[8])
@@ -410,9 +437,14 @@ float getTemp(const uint8_t rom[8]) {
 //
 // setupWiFi
 //
+// Connect to WiFi network
+//
 //========================================================
 void setupWiFi() {
-    // Connect to WiFi network
+
+  Serial.print("MAC address:");
+  Serial.println(WiFi.macAddress());
+
   Serial.print("Connecting to ");
   Serial.println(config_data.ssid);
   
@@ -441,6 +473,8 @@ void setupWiFi() {
 //========================================================
 void handleWebRequests()
 {
+  if (WiFi.status() != WL_CONNECTED) {setupWiFi();}
+  
   WiFiClient client = server.available();
   if (!client) { return; }
   client.setTimeout(5000);
@@ -464,6 +498,17 @@ void handleWebRequests()
     // Create page w/ one wire scan data
     Serial.println("Request scan page");
     scanForDevices(client);
+    while (client.available()) {
+      // byte by byte is not very efficient
+      client.read();
+    }
+    return;
+  }
+
+  if (req.indexOf(F("/wifi")) != -1) {
+    // Create page w/ one wire scan data
+    Serial.println("Request scan page");
+    configWiFi(client);
     while (client.available()) {
       // byte by byte is not very efficient
       client.read();
@@ -576,8 +621,36 @@ void processGet(String req){
 
   // Save any changes to EEPROM
   saveConfig();
+  delay(1000);
+  getConfig();
 }
 
+
+//========================================================
+//
+// configWiFi
+//
+// Diplay and permit changing WiFi parms.
+//
+//========================================================
+void configWiFi(WiFiClient client) {
+  String s_html = "<html><body>Wifi<br>";
+
+  // SSID
+  s_html += "<br><br><form action=\"/get\">SSID:<input type=\"text\" name=\"ssid\" value=";
+  s_html += config_data.ssid;
+  s_html += "><input type=\"submit\" value=\"Set\"></form>";
+
+  // Password
+  s_html += "<br><br><form action=\"/get\">Password:<input type=\"text\" name=\"pwd\" value=";
+  s_html += config_data.password;
+  s_html += "><input type=\"submit\" value=\"Set\"></form>";
+
+  s_html += "</body></html>";
+  
+  Serial.print(s_html);
+  client.println(s_html);
+}
 
 //========================================================
 //
@@ -689,7 +762,6 @@ void getConfig(){
 //    int d_pulse;
 //  } ;
   int eeAddress = 0;
-  EEPROM.begin(512);
   EEPROM.get(eeAddress, config_data);
   Serial.println(config_data.ssid);
   Serial.println(config_data.password);
